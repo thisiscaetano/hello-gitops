@@ -9,7 +9,7 @@ env:
   ECR_REPOSITORY: hello-gitops
 
 jobs:
-  build-push:
+  build-and-push:
     runs-on: ubuntu-latest
     permissions:
       contents: write
