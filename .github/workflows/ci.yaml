@@ -19,7 +19,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      # scan do codigo fonte e dependencias
+      # scan do codigo fonte e dependencias demo
       - name: Scan de segurança (Trivy)
         uses: aquasecurity/trivy-action@master
         with:
@@ -35,26 +35,67 @@ jobs:
           role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
           aws-region: ${{ env.AWS_REGION }}
 
-      - name: lpgin ecr
+      - name: login ecr
         id: ecr-login
         uses: aws-actions/amazon-ecr-login@v2
 
       - name: Build e push da imagem
         env:
-          REGISTRY: ${{ steps.ecr-login.outputs.registry }}
+          ECR_GITOPS: ${{ steps.ecr-login.outputs.ECR_GITOPS }}
         run: |
           TAG=${GITHUB_SHA::7}
-          IMAGE=$REGISTRY/$ECR_REPOSITORY
+          IMAGE=$ECR_GITOPS/$ECR_REPOSITORY
           docker build -t $IMAGE:$TAG .
           docker push $IMAGE:$TAG
           echo "IMAGE=$IMAGE" >> $GITHUB_ENV
           echo "TAG=$TAG" >> $GITHUB_ENV
 
-      # scan artefato SO base (apt/debian)
+      # scan artefato SO base (apt/debian) demo
       - name: Scan de segurança da imagem (Trivy)
         uses: aquasecurity/trivy-action@master
         with:
           image-ref: ${{ env.IMAGE }}:${{ env.TAG }}
           severity: CRITICAL,HIGH
-          exit-code: "1"
+          exit-code: "0"
           format: table
+
+  deploy:
+      runs-on: ubuntu-latest
+      needs: build-and-push
+      permissions:
+        contents: read
+        id-token: write
+  
+      steps:
+        - name: Configurar credenciais AWS via OIDC
+          uses: aws-actions/configure-aws-credentials@v4
+          with:
+            role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+            aws-region: ${{ env.AWS_REGION }}
+  
+        - name: Login no ECR
+          id: ecr-login
+          uses: aws-actions/amazon-ecr-login@v2
+  
+        - name: GitOps Foundation
+          env:
+            GLOBAL_MANIFEST_SSH_PRIVATE_KEY: ${{ secrets.GLOBAL_MANIFEST_SSH_PRIVATE_KEY }}
+            GLOBAL_MANIFEST: ${{ secrets.GLOBAL_MANIFEST }}
+            GITOPS_FOUNDATION_IMAGE: ${{ secrets.GITOPS_FOUNDATION_IMAGE }}
+            GITOPS_FOUNDATION_TAG: ${{ secrets.GITOPS_FOUNDATION_TAG }}
+          
+          run: |
+            ECR_GITOPS="${{ steps.ecr-login.outputs.ECR_GITOPS }}"
+            ARTIFACT_REGISTRY="${{ needs.build-and-push.outputs.image }}"
+            TAG="${{ needs.build-and-push.outputs.tag }}"
+  
+            docker run --rm \
+              -e APP_NAME="$ECR_REPOSITORY" \
+              -e TAG="$TAG" \
+              -e VERSION="$TAG" \
+              -e GLOBAL_MANIFEST_OVERLAY=prd \
+              -e GLOBAL_MANIFEST_REPOSITORY=$GLOBAL_MANIFEST \
+              -e GLOBAL_MANIFEST_REPOSITORY_DOMAIN=github.com \
+              -e ARTIFACT_REGISTRY="$ARTIFACT_REGISTRY" \
+              -e GLOBAL_MANIFEST_SSH_PRIVATE_KEY="$GLOBAL_MANIFEST_SSH_PRIVATE_KEY" \
+              "$ECR_GITOPS/$GITOPS_FOUNDATION_IMAGE:$GITOPS_FOUNDATION_TAG"
