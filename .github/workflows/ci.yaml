@@ -12,7 +12,7 @@ jobs:
   build-push:
     runs-on: ubuntu-latest
     permissions:
-      contents: read
+      contents: write
       id-token: write
 
     steps:
@@ -22,7 +22,7 @@ jobs:
       - name: Configurar credenciais AWS
         uses: aws-actions/configure-aws-credentials@v4
         with:
-          role-to-assume: arn:aws:iam::017820664539:role/platform-lab-gitops
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
 
           aws-region: ${{ env.AWS_REGION }}
 
