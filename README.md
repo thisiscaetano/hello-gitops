@@ -207,11 +207,159 @@ Diferenças práticas usadas aqui:
   visualizar o Pod novo nunca ficando `Ready` e o rollout ficando "travado" — bom gancho para
   falar de estratégias de deploy (rolling update, rollback automático, etc).
 
+## Autenticação da pipeline via OIDC (sem secrets fixos)
+
+O workflow `.github/workflows/ci.yaml` não usa usuário/senha estáticos para logar
+no registry — ele assume uma IAM Role via **OIDC do GitHub Actions**, no mesmo
+espírito do Pod Identity: nenhuma credencial de longa duração fica guardada como
+secret do repositório.
+
+Como funciona:
+1. O GitHub emite, durante o job, um token OIDC de curta duração identificando
+   o repositório/branch que está rodando.
+2. O passo `aws-actions/configure-aws-credentials@v4` troca esse token por
+   credenciais temporárias da AWS, assumindo a role indicada em `role-to-assume`.
+   O ARN da role **não fica escrito no workflow** — vem do secret
+   `${{ secrets.AWS_ROLE_ARN }}`, configurado em *Settings → Secrets and variables →
+   Actions* do repositório. Como este repo é público (fins de demonstração), o ARN
+   (que expõe o Account ID da AWS) não pode ficar visível no YAML versionado.
+3. `aws-actions/amazon-ecr-login@v2` usa essas credenciais para autenticar no ECR
+   e faz o `docker push` normalmente.
+
+Vale notar: mesmo sendo um secret do GitHub, o ARN da role sozinho não seria
+suficiente para alguém assumi-la — a **trust policy** da role (abaixo) já restringe
+quem pode usá-la ao seu repositório/branch específico. O secret é uma camada extra
+de cautela, não a única proteção.
+
+Para isso funcionar, a IAM Role (referenciada pelo secret `AWS_ROLE_ARN`) precisa de
+uma **trust policy** que só confia em tokens emitidos para este repositório
+específico — evitando que qualquer outro repo do GitHub consiga assumi-la:
+
+```json
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Effect": "Allow",
+      "Principal": {
+        "Federated": "arn:aws:iam::ACCOUNT_ID:oidc-provider/token.actions.githubusercontent.com"
+      },
+      "Action": "sts:AssumeRoleWithWebIdentity",
+      "Condition": {
+        "StringEquals": {
+          "token.actions.githubusercontent.com:aud": "sts.amazonaws.com"
+        },
+        "StringLike": {
+          "token.actions.githubusercontent.com:sub": "repo:SEU_ORG/SEU_REPO:ref:refs/heads/main"
+        }
+      }
+    }
+  ]
+}
+```
+
+E a role precisa de uma policy de permissão liberando push no ECR
+(`ecr:GetAuthorizationToken`, `ecr:BatchCheckLayerAvailability`, `ecr:PutImage`,
+`ecr:InitiateLayerUpload`, `ecr:UploadLayerPart`, `ecr:CompleteLayerUpload`).
+
+Isso exige que o cluster/conta AWS já tenha o **provedor OIDC do GitHub**
+registrado no IAM (`token.actions.githubusercontent.com`) — passo único por
+conta, feito uma vez (Console AWS → IAM → Identity providers, ou Terraform).
+
+## Scan de segurança no pipeline (Trivy)
+
+A pipeline tem **dois scans** com o [Trivy](https://github.com/aquasecurity/trivy-action),
+em pontos diferentes:
+
+**1. Scan do código-fonte (`fs`)**, logo após o checkout — escaneia o
+código e o `requirements.txt` em busca de:
+- Dependências Python com **vulnerabilidades conhecidas (CVEs)**.
+- Segredos/credenciais deixados acidentalmente no código (chave de API,
+  token, senha hardcoded).
+- Configurações inseguras em arquivos de infraestrutura (o Trivy também
+  entende YAML de Kubernetes/Dockerfile).
+
+```yaml
+- name: Scan de segurança (Trivy)
+  uses: aquasecurity/trivy-action@master
+  with:
+    scan-type: fs
+    scan-ref: .
+    severity: CRITICAL,HIGH
+    exit-code: "0"
+    format: table
+```
+
+Aqui `exit-code: "0"` faz o Trivy **reportar mas não falhar** a pipeline — o
+resultado aparece no log em formato de tabela, sem travar o fluxo.
+
+**2. Scan da imagem (`image`)**, depois do build/push — escaneia a imagem
+Docker já publicada, cobrindo uma camada que o scan de código não vê: o
+**SO base** (pacotes Debian/apt da imagem `python:3.12-slim`) e tudo que foi
+instalado no `Dockerfile`.
+
+```yaml
+- name: Scan de segurança da imagem (Trivy)
+  uses: aquasecurity/trivy-action@master
+  with:
+    image-ref: ${{ env.IMAGE }}:${{ env.TAG }}
+    severity: CRITICAL,HIGH
+    exit-code: "1"
+    format: table
+```
+
+Aqui `exit-code: "1"` já está configurado como **gate real**: se o Trivy achar
+algo `CRITICAL` ou `HIGH` na imagem, o job **falha nesse passo**, e o passo
+seguinte (atualizar `k8s/deployment.yaml` e commitar) **nunca roda** — ou seja,
+uma imagem vulnerável nunca chega a virar um commit que o ArgoCD/Flux
+sincronizaria no cluster. É a demonstração central de "shift-left security":
+o problema é barrado dentro do CI, antes de tocar no fluxo de GitOps.
+
+### Como forçar um erro para demonstrar a pipeline funcionando
+
+A forma mais simples e visual: fixar no `requirements.txt` uma versão antiga
+e conhecidamente vulnerável de alguma lib. Por exemplo, trocar:
+
+```
+flask==3.0.3
+```
+por uma versão bem antiga, tipo:
+```
+flask==0.12.2
+```
+
+Dá um `git commit` + `push` na `main` e acompanha o Actions rodando: o segundo
+step (scan de código) provavelmente já vai listar CVEs no log; mas o ponto
+mais visual de "pipeline bloqueando" é depois do build — o step **"Scan de
+segurança da imagem (Trivy)"** vai listar os CVEs em vermelho na tabela e o
+job vai falhar com X vermelho, e o passo de atualizar o manifest fica cinza
+("skipped"), mostrando claramente que o deploy foi barrado.
+
+Depois da demo, é só reverter o `requirements.txt` para `flask==3.0.3` e dar
+push de novo — a pipeline volta a passar normalmente.
+
+Outra opção, pra mostrar a detecção de **segredo vazado** (não vulnerabilidade
+de dependência): adicionar temporariamente uma linha óbvia em algum arquivo,
+por exemplo em `app.py`:
+```python
+AWS_SECRET_ACCESS_KEY = "AKIAABCDEFGHIJKLMNOP"  # linha só para demo
+```
+O primeiro scan (`fs`, na etapa de código) deve sinalizar isso como segredo
+exposto no log — mesmo com `exit-code: "0"` nessa etapa, o achado aparece
+destacado na tabela, bom para mostrar a detecção sem precisar quebrar o
+pipeline. Lembre de remover essa linha depois (nunca commitar de verdade).
+
 ## Ajustes que você precisa fazer antes de rodar
 
-- Trocar `SEU_REGISTRY` no `Dockerfile`... (na verdade está em `k8s/deployment.yaml` e `.github/workflows/ci.yaml`) pelo seu registry real (ghcr.io, Docker Hub, ECR, etc).
+- Criar a IAM Role com a trust policy e as permissões de ECR descritas acima
+  (seção "Autenticação da pipeline via OIDC"), trocando `ACCOUNT_ID`/`SEU_ORG`/`SEU_REPO`
+  pelos valores reais da sua conta AWS e repositório GitHub.
+- Configurar o secret **`AWS_ROLE_ARN`** em *Settings → Secrets and variables →
+  Actions* do repositório, com o ARN dessa role. Nunca colar o ARN direto no
+  `.github/workflows/ci.yaml` — o repo é público.
+- Trocar `ECR_REPOSITORY`/`AWS_REGION` em `.github/workflows/ci.yaml` se usar outro
+  nome de repositório ECR ou região.
 - Trocar o `endpoint` em `k8s/instrumentation.yaml` pelo Service do seu OTel Collector.
-- Configurar os secrets `REGISTRY_USER` / `REGISTRY_PASSWORD` no repositório (se usar GitHub Actions).
 - Ter o **External Secrets Operator** instalado no cluster (`helm install external-secrets ...`).
 - Ter o add-on **`eks-pod-identity-agent`** instalado no cluster EKS.
 - Criar a IAM Role com permissão `secretsmanager:GetSecretValue` e associá-la à

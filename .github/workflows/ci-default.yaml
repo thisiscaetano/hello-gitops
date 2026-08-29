@@ -34,9 +34,6 @@ jobs:
           docker push $IMAGE:$TAG
           echo "TAG=$TAG" >> $GITHUB_ENV
 
-      # Passo que fecha o loop do GitOps: atualiza a tag da imagem
-      # no manifest e commita. O ArgoCD/Flux detecta essa mudança
-      # e sincroniza automaticamente no cluster.
       - name: Atualizar tag no deployment.yaml
         run: |
           sed -i "s|image: .*hello-gitops:.*|image: $IMAGE:$TAG|" k8s/deployment.yaml
