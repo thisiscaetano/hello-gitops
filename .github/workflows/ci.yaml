@@ -15,6 +15,10 @@ jobs:
       contents: write
       id-token: write
 
+    outputs:
+      tag: ${{ steps.build.outputs.tag }}
+      image: ${{ steps.build.outputs.image }}
+
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -40,8 +44,9 @@ jobs:
         uses: aws-actions/amazon-ecr-login@v2
 
       - name: Build e push da imagem
+        id: build
         env:
-          ECR_GITOPS: ${{ steps.ecr-login.outputs.ECR_GITOPS }}
+          ECR_GITOPS: ${{ steps.ecr-login.outputs.registry }}
         run: |
           TAG=${GITHUB_SHA::7}
           IMAGE=$ECR_GITOPS/$ECR_REPOSITORY
@@ -49,6 +54,8 @@ jobs:
           docker push $IMAGE:$TAG
           echo "IMAGE=$IMAGE" >> $GITHUB_ENV
           echo "TAG=$TAG" >> $GITHUB_ENV
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "image=$IMAGE" >> "$GITHUB_OUTPUT"
 
       # scan artefato SO base (apt/debian) demo
       - name: Scan de segurança da imagem (Trivy)
@@ -85,7 +92,7 @@ jobs:
             GITOPS_FOUNDATION_TAG: ${{ secrets.GITOPS_FOUNDATION_TAG }}
           
           run: |
-            ECR_GITOPS="${{ steps.ecr-login.outputs.ECR_GITOPS }}"
+            ECR_GITOPS="${{ steps.ecr-login.outputs.registry }}"
             ARTIFACT_REGISTRY="${{ needs.build-and-push.outputs.image }}"
             TAG="${{ needs.build-and-push.outputs.tag }}"
   
