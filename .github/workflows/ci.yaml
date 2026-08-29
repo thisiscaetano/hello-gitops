@@ -22,7 +22,8 @@ jobs:
       - name: Configurar credenciais AWS
         uses: aws-actions/configure-aws-credentials@v4
         with:
-          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          role-to-assume: AWS_ROLE_ARN = arn:aws:iam::017820664539:role/platform-lab-gitops
+
           aws-region: ${{ env.AWS_REGION }}
 
       - name: Login no ECR
