@@ -35,7 +35,7 @@ def mask(value: str) -> str:
 @app.route("/")
 def hello():
     logger.info(f"request recebida na rota / (version={APP_VERSION})")
-    return jsonify(message="Hello, GitOps World!!!", version=APP_VERSION)
+    return jsonify(message="Hello, GitOps World!", version=APP_VERSION)
 
 
 @app.route("/health")
