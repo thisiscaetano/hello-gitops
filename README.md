@@ -349,6 +349,68 @@ exposto no log — mesmo com `exit-code: "0"` nessa etapa, o achado aparece
 destacado na tabela, bom para mostrar a detecção sem precisar quebrar o
 pipeline. Lembre de remover essa linha depois (nunca commitar de verdade).
 
+## Stress test / validação do HPA
+
+Dois scripts para gerar carga na app e validar o escalonamento automático (HPA configurado com min 2 / max 10 réplicas, threshold de 80% CPU e memória).
+
+### stress.sh — recomendado (usa `wrk`)
+
+Mais leve e eficiente. Usa threads internas em vez de spawnar um processo por request.
+
+**Instalação:**
+```bash
+sudo pacman -S wrk        # Arch
+sudo apt install wrk      # Debian/Ubuntu
+```
+
+**Uso:**
+```bash
+./stress.sh <BASE_URL> [CONCURRENCY] [DURATION_SECONDS]
+```
+
+```bash
+# 50 conexões por 120s em cada rota
+./stress.sh https://hello-gitops.example.com 50 120
+
+# mais agressivo
+./stress.sh https://hello-gitops.example.com 200 60
+```
+
+O script roda cada rota sequencialmente (`/`, `/health`, `/secret-check`, `/error`) e exibe o relatório do `wrk` com requests/sec, latência e erros.
+
+### stress-curl.sh — sem dependências extras
+
+Usa apenas `curl` + `xargs` (já disponíveis no sistema). Controla a concorrência via `xargs -P` para não travar a máquina.
+
+**Uso:**
+```bash
+./stress-curl.sh <BASE_URL> [TOTAL_REQUESTS] [CONCURRENCY]
+```
+
+```bash
+# 500 reqs por rota, 20 em paralelo
+./stress-curl.sh https://hello-gitops.example.com 500 20
+
+# mais carga
+./stress-curl.sh https://hello-gitops.example.com 2000 50
+```
+
+Ao final de cada rota exibe um resumo de quantas respostas por HTTP status code.
+
+> ⚠️ Evite valores muito altos de concorrência no `stress-curl.sh` (acima de 50) — diferente do `wrk`, cada request ainda spawna um processo `curl`.
+
+### Acompanhando o HPA em tempo real
+
+Enquanto o stress roda, em outro terminal:
+
+```bash
+kubectl get hpa hello-gitops-hpa -w
+```
+
+Espere alguns minutos após o início da carga — o HPA tem um cooldown padrão de ~15s para escalar para cima e ~5min para escalar para baixo.
+
+---
+
 ## Ajustes que você precisa fazer antes de rodar
 
 - Criar a IAM Role com a trust policy e as permissões de ECR descritas acima
